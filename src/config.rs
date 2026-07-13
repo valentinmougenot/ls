@@ -5,6 +5,7 @@ pub struct Config {
     pub hidden_mode: HiddenMode,
     pub reverse: bool,
     pub list_dir: bool,
+    pub recursive: bool,
     pub paths: Vec<PathBuf>,
 }
 

@@ -1,8 +1,10 @@
 use std::{
+    collections::VecDeque,
     ffi::OsString,
+    fs::DirEntry,
     io::{self},
     os::unix::ffi::OsStrExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use terminal_size::{Width, terminal_size};
@@ -23,15 +25,17 @@ impl<'a, W: io::Write> Lister<'a, W> {
         if self.config.list_dir {
             self.list_directory()?;
         } else {
-            for (i, path) in self.config.paths.iter().enumerate() {
-                if self.config.paths.len() > 1 {
+            let mut queue: VecDeque<_> = self.config.paths.iter().map(PathBuf::from).collect();
+
+            while let Some(path) = queue.pop_front() {
+                if self.config.paths.len() > 1 || self.config.recursive {
                     self.out.write_all(path.as_os_str().as_bytes())?;
                     self.out.write_all(b":\n")?;
                 }
 
-                self.list_one(path)?;
+                self.list_one(&path, &mut queue)?;
 
-                if i < self.config.paths.len() - 1 {
+                if !queue.is_empty() {
                     self.out.write_all(b"\n")?;
                 }
             }
@@ -40,14 +44,13 @@ impl<'a, W: io::Write> Lister<'a, W> {
         Ok(())
     }
 
-    fn list_one(&mut self, path: &Path) -> io::Result<()> {
-        let mut entries: Vec<_> = match std::fs::read_dir(path) {
+    fn list_one(&mut self, path: &Path, queue: &mut VecDeque<PathBuf>) -> io::Result<()> {
+        let raw_entries: Vec<_> = match std::fs::read_dir(path) {
             Ok(entries) => entries
                 .flatten()
-                .map(|e| e.file_name())
                 .filter(|e| {
                     if self.config.hidden_mode == HiddenMode::Default {
-                        e.as_bytes().first() != Some(&b'.')
+                        e.file_name().as_bytes().first() != Some(&b'.')
                     } else {
                         true
                     }
@@ -58,6 +61,12 @@ impl<'a, W: io::Write> Lister<'a, W> {
                 return Err(err);
             }
         };
+
+        if self.config.recursive {
+            self.handle_recursion(path, &raw_entries, queue);
+        }
+
+        let mut entries: Vec<_> = raw_entries.into_iter().map(|e| e.file_name()).collect();
 
         if self.config.hidden_mode == HiddenMode::All {
             entries.push(OsString::from("."));
@@ -160,6 +169,30 @@ impl<'a, W: io::Write> Lister<'a, W> {
         }
 
         Ok(())
+    }
+
+    fn handle_recursion(
+        &self,
+        path: &Path,
+        raw_entries: &[DirEntry],
+        queue: &mut VecDeque<PathBuf>,
+    ) {
+        let mut sub_directories: Vec<_> = raw_entries
+            .iter()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| path.to_owned().join(e.file_name()))
+            .collect();
+
+        sub_directories.sort();
+        if self.config.reverse {
+            for sub_dir in sub_directories {
+                queue.push_front(sub_dir);
+            }
+        } else {
+            for sub_dir in sub_directories.into_iter().rev() {
+                queue.push_front(sub_dir);
+            }
+        }
     }
 }
 

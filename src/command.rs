@@ -19,6 +19,7 @@ pub mod options {
 
     pub const DIRECTORY: &str = "directory";
     pub const REVERSE: &str = "reverse";
+    pub const RECURSIVE: &str = "recursive";
     pub const PATH: &str = "path";
 }
 
@@ -65,6 +66,13 @@ pub fn get_matches() -> ArgMatches {
                 .short('d')
                 .long(options::DIRECTORY)
                 .help("list directories themselves, not their contents")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(options::RECURSIVE)
+                .short('R')
+                .long(options::RECURSIVE)
+                .help("list subdirectories recursively")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -138,6 +146,7 @@ impl From<&ArgMatches> for Config {
             hidden_mode,
             reverse: options.get_flag(options::REVERSE),
             list_dir: options.get_flag(options::DIRECTORY),
+            recursive: options.get_flag(options::RECURSIVE),
             paths,
         }
     }
