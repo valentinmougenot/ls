@@ -4,7 +4,7 @@ use clap::parser::ValueSource;
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::config::{Config, Format, HiddenMode};
+use crate::config::{Config, Format, HiddenMode, Sort};
 
 pub mod options {
     pub mod format {
@@ -15,6 +15,10 @@ pub mod options {
         pub const ALL: &str = "all";
         pub const ALMOST_ALL: &str = "almost-all";
         pub const UNSORTED_ALL: &str = "f";
+    }
+
+    pub mod sort {
+        pub const TIME: &str = "t";
     }
 
     pub const DIRECTORY: &str = "directory";
@@ -76,6 +80,12 @@ pub fn get_matches() -> ArgMatches {
                 .action(ArgAction::SetTrue),
         )
         .arg(
+            Arg::new(options::sort::TIME)
+                .short('t')
+                .help("sort by time, newest first; see --time")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new(options::PATH)
                 .action(ArgAction::Append)
                 .default_value("."),
@@ -127,6 +137,26 @@ fn extract_hidden_mode(options: &ArgMatches) -> HiddenMode {
     }
 }
 
+fn extract_sort(options: &ArgMatches) -> Sort {
+    let get_idx = |flag: &str| {
+        if options.value_source(flag) == Some(ValueSource::CommandLine) {
+            options.index_of(flag).unwrap_or(0)
+        } else {
+            0
+        }
+    };
+
+    let sort_idx = get_idx(options::sort::TIME);
+
+    let max_idx = sort_idx;
+
+    if max_idx == 0 {
+        Sort::Default
+    } else {
+        Sort::Time
+    }
+}
+
 fn extract_paths(options: &ArgMatches) -> Vec<PathBuf> {
     options
         .get_many::<String>(options::PATH)
@@ -137,17 +167,14 @@ fn extract_paths(options: &ArgMatches) -> Vec<PathBuf> {
 
 impl From<&ArgMatches> for Config {
     fn from(options: &ArgMatches) -> Self {
-        let format = extract_format(options);
-        let hidden_mode = extract_hidden_mode(options);
-        let paths = extract_paths(options);
-
         Self {
-            format,
-            hidden_mode,
+            format: extract_format(options),
+            hidden_mode: extract_hidden_mode(options),
             reverse: options.get_flag(options::REVERSE),
             list_dir: options.get_flag(options::DIRECTORY),
             recursive: options.get_flag(options::RECURSIVE),
-            paths,
+            sort: extract_sort(options),
+            paths: extract_paths(options),
         }
     }
 }

@@ -6,6 +6,7 @@ pub struct Config {
     pub reverse: bool,
     pub list_dir: bool,
     pub recursive: bool,
+    pub sort: Sort,
     pub paths: Vec<PathBuf>,
 }
 
@@ -19,5 +20,11 @@ pub enum Format {
 pub enum HiddenMode {
     All,
     AlmostAll,
+    Default,
+}
+
+#[derive(PartialEq, Eq)]
+pub enum Sort {
+    Time,
     Default,
 }
