@@ -205,3 +205,261 @@ fn gnu_style_error(path: &Path, err: &io::Error) -> String {
     };
     format!("ls: cannot access '{}': {}", path.display(), reason)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, path::PathBuf};
+
+    use crate::config::{Config, Format, HiddenMode};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("ls_tests_{}", name));
+            fs::remove_dir_all(&path).ok();
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn file(&self, name: &str) -> &Self {
+            fs::write(self.0.join(name), "").unwrap();
+            self
+        }
+
+        fn dir(&self, name: &str) -> &Self {
+            fs::create_dir_all(self.0.join(name)).unwrap();
+            self
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn make_config(
+        format: Format,
+        hidden_mode: HiddenMode,
+        reverse: bool,
+        recursive: bool,
+        paths: Vec<PathBuf>,
+    ) -> Config {
+        Config {
+            format,
+            hidden_mode,
+            reverse,
+            list_dir: false,
+            recursive,
+            paths,
+        }
+    }
+
+    fn run(config: &Config) -> String {
+        let mut out = Vec::new();
+        Lister::new(config, &mut out).list().unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    // --- sort_entries ---
+
+    #[test]
+    fn sort_entries_alphabetical() {
+        let c = make_config(Format::Default, HiddenMode::Default, false, false, vec![]);
+        let lister = Lister::new(&c, Vec::<u8>::new());
+        let mut entries: Vec<OsString> = vec!["c".into(), "a".into(), "b".into()];
+        lister.sort_entries(&mut entries);
+        assert_eq!(
+            entries,
+            vec![
+                OsString::from("a"),
+                OsString::from("b"),
+                OsString::from("c")
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_entries_reverse() {
+        let c = make_config(Format::Default, HiddenMode::Default, true, false, vec![]);
+        let lister = Lister::new(&c, Vec::<u8>::new());
+        let mut entries: Vec<OsString> = vec!["c".into(), "a".into(), "b".into()];
+        lister.sort_entries(&mut entries);
+        assert_eq!(
+            entries,
+            vec![
+                OsString::from("c"),
+                OsString::from("b"),
+                OsString::from("a")
+            ]
+        );
+    }
+
+    // --- write_one_column_output ---
+
+    #[test]
+    fn one_column_output() {
+        let c = make_config(Format::OneLine, HiddenMode::Default, false, false, vec![]);
+        let mut out = Vec::new();
+        let mut lister = Lister::new(&c, &mut out);
+        let entries: Vec<OsString> = vec!["a".into(), "b".into(), "c".into()];
+        lister.write_one_column_output(&entries).unwrap();
+        assert_eq!(out, b"a\nb\nc\n");
+    }
+
+    // --- write_multi_columns_output ---
+
+    #[test]
+    fn multi_column_output() {
+        // 4 entries, 2 columns of widths [3, 5] → 2 rows
+        // row 0: entries[0]="aa"  entries[2]="ccc"
+        // row 1: entries[1]="b"   entries[3]="d"
+        let c = make_config(Format::Default, HiddenMode::Default, false, false, vec![]);
+        let mut out = Vec::new();
+        let mut lister = Lister::new(&c, &mut out);
+        let entries: Vec<OsString> = vec!["aa".into(), "b".into(), "ccc".into(), "d".into()];
+        lister
+            .write_multi_columns_output(&entries, &[3, 5])
+            .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "aa   ccc\nb    d\n");
+    }
+
+    // --- calculate_columns_widths ---
+
+    #[test]
+    fn columns_widths_returns_none_for_one_line_format() {
+        let c = make_config(Format::OneLine, HiddenMode::Default, false, false, vec![]);
+        let lister = Lister::new(&c, Vec::<u8>::new());
+        let entries: Vec<OsString> = vec!["a".into(), "b".into()];
+        assert_eq!(lister.calculate_columns_widths(&entries), None);
+    }
+
+    // --- list() ---
+
+    #[test]
+    fn list_alphabetical_order() {
+        let dir = TempDir::new("alphabetical");
+        dir.file("c").file("a").file("b");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            false,
+            false,
+            vec![dir.path()],
+        );
+        assert_eq!(run(&c), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn list_reverse_order() {
+        let dir = TempDir::new("reverse");
+        dir.file("a").file("b").file("c");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            true,
+            false,
+            vec![dir.path()],
+        );
+        assert_eq!(run(&c), "c\nb\na\n");
+    }
+
+    #[test]
+    fn list_excludes_hidden_by_default() {
+        let dir = TempDir::new("hidden_default");
+        dir.file("visible").file(".hidden");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            false,
+            false,
+            vec![dir.path()],
+        );
+        assert_eq!(run(&c), "visible\n");
+    }
+
+    #[test]
+    fn list_all_includes_hidden_and_dots() {
+        let dir = TempDir::new("hidden_all");
+        dir.file("visible").file(".hidden");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::All,
+            false,
+            false,
+            vec![dir.path()],
+        );
+        assert_eq!(run(&c), ".\n..\n.hidden\nvisible\n");
+    }
+
+    #[test]
+    fn list_almost_all_includes_hidden_not_dots() {
+        let dir = TempDir::new("hidden_almost_all");
+        dir.file("visible").file(".hidden");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::AlmostAll,
+            false,
+            false,
+            vec![dir.path()],
+        );
+        assert_eq!(run(&c), ".hidden\nvisible\n");
+    }
+
+    #[test]
+    fn list_multiple_paths_shows_headers() {
+        let dir1 = TempDir::new("multi1");
+        let dir2 = TempDir::new("multi2");
+        dir1.file("x");
+        dir2.file("y");
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            false,
+            false,
+            vec![dir1.path(), dir2.path()],
+        );
+        let out = run(&c);
+        let sections: Vec<&str> = out.split("\n\n").collect();
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].contains(":\n") && sections[0].contains("x"));
+        assert!(sections[1].contains(":\n") && sections[1].contains("y"));
+    }
+
+    #[test]
+    fn list_recursive_visits_subdirectories() {
+        let dir = TempDir::new("recursive");
+        dir.file("root_file").dir("subdir");
+        fs::write(dir.path().join("subdir/sub_file"), "").unwrap();
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            false,
+            true,
+            vec![dir.path()],
+        );
+        let out = run(&c);
+        assert!(out.contains("root_file\n"));
+        assert!(out.contains("subdir\n"));
+        assert!(out.contains("sub_file\n"));
+    }
+
+    #[test]
+    fn list_nonexistent_path_returns_error() {
+        let c = make_config(
+            Format::OneLine,
+            HiddenMode::Default,
+            false,
+            false,
+            vec![PathBuf::from("/nonexistent_ls_test_path")],
+        );
+        let mut out = Vec::new();
+        assert!(Lister::new(&c, &mut out).list().is_err());
+    }
+}
