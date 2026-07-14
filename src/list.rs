@@ -9,20 +9,25 @@ use std::{
     time::SystemTime,
 };
 
-use chrono::{DateTime, Local};
-use nix::unistd::{Group, User};
-use terminal_size::{Width, terminal_size};
-
-use crate::config::{Config, Format, HiddenMode, Sort};
+use crate::{
+    config::{Config, Format, HiddenMode, Sort},
+    output::{OutputFormatter, get_formatter},
+};
 
 pub struct Lister<'a, W: io::Write> {
     config: &'a Config,
     out: W,
+    formatter: Box<dyn OutputFormatter>,
 }
 
 impl<'a, W: io::Write> Lister<'a, W> {
     pub fn new(config: &'a Config, out: W) -> Self {
-        Self { config, out }
+        let formatter = get_formatter(config);
+        Self {
+            config,
+            out,
+            formatter,
+        }
     }
 
     pub fn list(&mut self) -> io::Result<()> {
@@ -61,6 +66,7 @@ impl<'a, W: io::Write> Lister<'a, W> {
                 })
                 .collect(),
             Err(err) => {
+                self.out.flush()?;
                 eprintln!("{}", gnu_style_error(path, &err));
                 return Err(err);
             }
@@ -72,17 +78,25 @@ impl<'a, W: io::Write> Lister<'a, W> {
 
         let mut entries: Vec<EntryInfo> = raw_entries
             .into_iter()
-            .map(EntryInfo::try_from)
+            .map(|e| EntryInfo::try_from_dir_entry(&e, self.config))
             .collect::<io::Result<Vec<EntryInfo>>>()?;
 
         if self.config.hidden_mode == HiddenMode::All {
-            entries.push(EntryInfo::try_from_parent(path, OsString::from("."))?);
-            entries.push(EntryInfo::try_from_parent(path, OsString::from(".."))?);
+            entries.push(EntryInfo::try_from_parent(
+                path,
+                OsString::from("."),
+                self.config,
+            )?);
+            entries.push(EntryInfo::try_from_parent(
+                path,
+                OsString::from(".."),
+                self.config,
+            )?);
         }
 
         self.sort_entries(&mut entries);
 
-        self.write_output(&entries)
+        self.formatter.write(&mut self.out, &entries)
     }
 
     fn list_directory(&mut self) -> io::Result<()> {
@@ -90,111 +104,16 @@ impl<'a, W: io::Write> Lister<'a, W> {
             .config
             .paths
             .iter()
-            .map(|e| EntryInfo::try_from_name(OsString::from(e)))
+            .map(|e| EntryInfo::try_from_name(OsString::from(e), self.config))
             .collect::<io::Result<Vec<EntryInfo>>>()?;
 
         self.sort_entries(&mut entries);
 
-        self.write_output(&entries)
+        self.formatter.write(&mut self.out, &entries)
     }
 
     fn sort_entries(&self, entries: &mut [EntryInfo]) {
         entries.sort_by(|a, b| a.cmp_with_config(b, self.config));
-    }
-
-    fn calculate_columns_widths(&self, entries: &[EntryInfo]) -> Option<Vec<usize>> {
-        if self.config.format != Format::Default {
-            return None;
-        }
-
-        let mut col_count = entries.len();
-        let mut fits = false;
-
-        if let Some((Width(term_width), _)) = terminal_size() {
-            while !fits && col_count > 1 {
-                let mut col_widths = vec![0; col_count];
-                let rows_count = entries.len().div_ceil(col_count);
-
-                for (i, entry) in entries.iter().enumerate() {
-                    let col = i / rows_count;
-                    col_widths[col] = col_widths[col].max(entry.name.len());
-                }
-
-                let total_width = col_widths.iter().copied().sum::<usize>() + 2 * (col_count - 1);
-                fits = total_width <= term_width as usize;
-
-                if !fits {
-                    col_count -= 1;
-                } else {
-                    col_widths.retain(|&c| c != 0);
-                    return Some(col_widths);
-                }
-            }
-        }
-
-        None
-    }
-
-    fn write_output(&mut self, entries: &[EntryInfo]) -> io::Result<()> {
-        match self.calculate_columns_widths(entries) {
-            Some(values) => self.write_multi_columns_output(entries, &values),
-            None => self.write_one_column_output(entries),
-        }
-    }
-
-    fn write_one_column_output(&mut self, entries: &[EntryInfo]) -> io::Result<()> {
-        if self.config.format == Format::Long {
-            self.write_long_format(entries)?;
-        } else {
-            for entry in entries {
-                entry.write(&mut self.out)?;
-                writeln!(self.out)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn write_multi_columns_output(
-        &mut self,
-        entries: &[EntryInfo],
-        col_widths: &[usize],
-    ) -> io::Result<()> {
-        let cols_count = col_widths.len();
-        let rows_count = entries.len().div_ceil(cols_count);
-
-        for row in 0..rows_count {
-            for (col, col_width) in col_widths.iter().enumerate() {
-                let idx = col * rows_count + row;
-
-                if idx >= entries.len() {
-                    break;
-                }
-
-                let entry = &entries[idx];
-                entry.write(&mut self.out)?;
-
-                if col < cols_count - 1 {
-                    let padding = " ".repeat(col_width.saturating_sub(entry.name.len()) + 2);
-                    write!(self.out, "{}", padding)?;
-                }
-            }
-            self.out.write_all(b"\n")?;
-        }
-
-        Ok(())
-    }
-
-    fn write_long_format(&mut self, entries: &[EntryInfo]) -> io::Result<()> {
-        let lines: Vec<_> = entries.iter().map(LongFormatLine::from).collect();
-        let col_widths = LongFormatColumnWidths::from_lines(&lines);
-
-        writeln!(&mut self.out, "total {}", total_kb_blocks(entries))?;
-        for line in &lines {
-            line.write(&mut self.out, &col_widths)?;
-        }
-
-        Ok(())
     }
 
     fn handle_recursion(
@@ -206,7 +125,7 @@ impl<'a, W: io::Write> Lister<'a, W> {
         let mut sub_directories: Vec<_> = raw_entries
             .iter()
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .map(EntryInfo::try_from)
+            .map(|e| EntryInfo::try_from_dir_entry(e, self.config))
             .collect::<io::Result<Vec<_>>>()?;
 
         sub_directories.sort_by(|a, b| a.cmp_with_config(b, self.config));
@@ -218,59 +137,49 @@ impl<'a, W: io::Write> Lister<'a, W> {
     }
 }
 
-struct EntryInfo {
-    name: OsString,
-    modified_at: SystemTime,
-    size: u64,
-    is_dir: bool,
-    is_symlink: bool,
-    symlink_target: Option<PathBuf>,
-    permissions: u32,
-    uid: u32,
-    gid: u32,
-    nlink: u64,
-    blocks_512: u64,
-}
-
-impl TryFrom<DirEntry> for EntryInfo {
-    type Error = io::Error;
-
-    fn try_from(value: DirEntry) -> Result<Self, Self::Error> {
-        Self::try_from_metadata(
-            value.metadata()?,
-            value.file_name().to_os_string(),
-            value.path(),
-        )
-    }
-}
-
-impl TryFrom<&DirEntry> for EntryInfo {
-    type Error = io::Error;
-
-    fn try_from(value: &DirEntry) -> Result<Self, Self::Error> {
-        Self::try_from_metadata(
-            value.metadata()?,
-            value.file_name().to_os_string(),
-            value.path(),
-        )
-    }
+pub(crate) struct EntryInfo {
+    pub name: OsString,
+    pub modified_at: SystemTime,
+    pub size: u64,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub symlink_target: Option<PathBuf>,
+    pub permissions: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub nlink: u64,
+    pub blocks_512: u64,
 }
 
 impl EntryInfo {
-    fn try_from_parent(parent: &Path, name: OsString) -> io::Result<Self> {
+    fn try_from_dir_entry(value: &DirEntry, config: &Config) -> io::Result<Self> {
+        Self::try_from_metadata(
+            value.metadata()?,
+            value.file_name().to_os_string(),
+            value.path(),
+            config,
+        )
+    }
+
+    fn try_from_parent(parent: &Path, name: OsString, config: &Config) -> io::Result<Self> {
         let path = parent.join(&name);
         let metadata = path.symlink_metadata()?;
-        Self::try_from_metadata(metadata, name, path)
+        Self::try_from_metadata(metadata, name, path, config)
     }
 
-    fn try_from_name(name: OsString) -> io::Result<Self> {
+    fn try_from_name(name: OsString, config: &Config) -> io::Result<Self> {
         let path = PathBuf::from(&name);
         let metadata = path.symlink_metadata()?;
-        Self::try_from_metadata(metadata, name, path)
+        Self::try_from_metadata(metadata, name, path, config)
     }
 
-    fn try_from_metadata(metadata: Metadata, name: OsString, path: PathBuf) -> io::Result<Self> {
-        let symlink_target = if metadata.is_symlink() {
+    fn try_from_metadata(
+        metadata: Metadata,
+        name: OsString,
+        path: PathBuf,
+        config: &Config,
+    ) -> io::Result<Self> {
+        let symlink_target = if metadata.is_symlink() && config.format == Format::Long {
             std::fs::read_link(&path).ok()
         } else {
             None
@@ -291,12 +200,8 @@ impl EntryInfo {
         })
     }
 
-    fn write<W: io::Write>(&self, out: &mut W) -> io::Result<()> {
-        out.write_all(self.name.as_bytes())
-    }
-
     #[cfg(test)]
-    fn from_name_only(name: impl Into<OsString>) -> Self {
+    pub(crate) fn from_name_only(name: impl Into<OsString>) -> Self {
         Self {
             name: name.into(),
             modified_at: SystemTime::UNIX_EPOCH,
@@ -347,147 +252,6 @@ impl EntryInfo {
 
         ordering
     }
-}
-
-struct LongFormatLine {
-    mode: String,
-    nlink: String,
-    user_name: String,
-    group_name: String,
-    size: String,
-    modified: String,
-    name: String,
-}
-
-impl LongFormatLine {
-    fn write<W: io::Write>(
-        &self,
-        out: &mut W,
-        col_widths: &LongFormatColumnWidths,
-    ) -> io::Result<()> {
-        let mode_width = col_widths.mode;
-        let nlink_width = col_widths.nlink;
-        let user_name_width = col_widths.user_name;
-        let group_name_width = col_widths.group_name;
-        let size_width = col_widths.size;
-        let modified_width = col_widths.modified;
-
-        writeln!(
-            out,
-            "{:>mode_width$} {:>nlink_width$} {:<user_name_width$} {:<group_name_width$} {:>size_width$} {:>modified_width$} {}",
-            self.mode,
-            self.nlink,
-            self.user_name,
-            self.group_name,
-            self.size,
-            self.modified,
-            self.name,
-        )
-    }
-}
-
-impl From<&EntryInfo> for LongFormatLine {
-    fn from(value: &EntryInfo) -> Self {
-        let mut mode = String::new();
-        if value.is_dir {
-            mode.push('d');
-        } else if value.is_symlink {
-            mode.push('l');
-        } else {
-            mode.push('-');
-        }
-
-        let mut write_perm_flag = |c: char, mask: u32| {
-            if value.permissions & mask > 0 {
-                mode.push(c);
-            } else {
-                mode.push('-');
-            }
-        };
-        write_perm_flag('r', 0o400);
-        write_perm_flag('w', 0o200);
-        write_perm_flag('x', 0o100);
-        write_perm_flag('r', 0o40);
-        write_perm_flag('w', 0o20);
-        write_perm_flag('x', 0o10);
-        write_perm_flag('r', 0o4);
-        write_perm_flag('w', 0o2);
-        write_perm_flag('x', 0o1);
-
-        let uid = nix::unistd::Uid::from_raw(value.uid);
-        let user_name = match User::from_uid(uid) {
-            Ok(Some(user)) => user.name,
-            _ => value.uid.to_string(),
-        };
-        let gid = nix::unistd::Gid::from_raw(value.gid);
-        let group_name = match Group::from_gid(gid) {
-            Ok(Some(group)) => group.name,
-            _ => value.gid.to_string(),
-        };
-
-        let datetime: DateTime<Local> = value.modified_at.into();
-        let now = Local::now();
-        let is_old = now.signed_duration_since(datetime).num_days() > 180;
-
-        let modified = if is_old {
-            datetime.format("%b %e  %Y").to_string()
-        } else {
-            datetime.format("%b %e %H:%M").to_string()
-        };
-
-        let name = if let Some(symlink_target) = value.symlink_target.as_ref() {
-            format!(
-                "{} -> {}",
-                value.name.to_string_lossy(),
-                symlink_target.to_string_lossy()
-            )
-        } else {
-            value.name.to_string_lossy().to_string()
-        };
-
-        Self {
-            mode,
-            nlink: value.nlink.to_string(),
-            user_name,
-            group_name,
-            size: value.size.to_string(),
-            modified,
-            name,
-        }
-    }
-}
-
-struct LongFormatColumnWidths {
-    mode: usize,
-    nlink: usize,
-    user_name: usize,
-    group_name: usize,
-    size: usize,
-    modified: usize,
-}
-
-impl LongFormatColumnWidths {
-    fn from_lines(lines: &[LongFormatLine]) -> Self {
-        let mode = lines.iter().map(|l| l.mode.len()).max().unwrap_or(0);
-        let nlink = lines.iter().map(|l| l.nlink.len()).max().unwrap_or(0);
-        let user_name = lines.iter().map(|l| l.user_name.len()).max().unwrap_or(0);
-        let group_name = lines.iter().map(|l| l.group_name.len()).max().unwrap_or(0);
-        let size = lines.iter().map(|l| l.size.len()).max().unwrap_or(0);
-        let modified = lines.iter().map(|l| l.modified.len()).max().unwrap_or(0);
-
-        Self {
-            mode,
-            nlink,
-            user_name,
-            group_name,
-            size,
-            modified,
-        }
-    }
-}
-
-fn total_kb_blocks(entries: &[EntryInfo]) -> u64 {
-    entries.iter().map(|e| e.blocks_512).sum::<u64>() / 2
 }
 
 fn gnu_style_error(path: &Path, err: &io::Error) -> String {
@@ -598,48 +362,6 @@ mod tests {
         lister.sort_entries(&mut entries);
         let names: Vec<&str> = entries.iter().map(|e| e.name.to_str().unwrap()).collect();
         assert_eq!(names, vec!["c", "b", "a"]);
-    }
-
-    #[test]
-    fn one_column_output() {
-        let c = make_config(Format::OneLine, HiddenMode::Default, false, false, vec![]);
-        let mut out = Vec::new();
-        let mut lister = Lister::new(&c, &mut out);
-        let entries: Vec<EntryInfo> = vec!["a", "b", "c"]
-            .into_iter()
-            .map(EntryInfo::from_name_only)
-            .collect();
-        lister.write_one_column_output(&entries).unwrap();
-        assert_eq!(out, b"a\nb\nc\n");
-    }
-
-    #[test]
-    fn multi_column_output() {
-        // 4 entries, 2 columns of widths [3, 5] → 2 rows
-        // row 0: entries[0]="aa"  entries[2]="ccc"
-        // row 1: entries[1]="b"   entries[3]="d"
-        let c = make_config(Format::Default, HiddenMode::Default, false, false, vec![]);
-        let mut out = Vec::new();
-        let mut lister = Lister::new(&c, &mut out);
-        let entries: Vec<EntryInfo> = vec!["aa", "b", "ccc", "d"]
-            .into_iter()
-            .map(EntryInfo::from_name_only)
-            .collect();
-        lister
-            .write_multi_columns_output(&entries, &[3, 5])
-            .unwrap();
-        assert_eq!(String::from_utf8(out).unwrap(), "aa   ccc\nb    d\n");
-    }
-
-    #[test]
-    fn columns_widths_returns_none_for_one_line_format() {
-        let c = make_config(Format::OneLine, HiddenMode::Default, false, false, vec![]);
-        let lister = Lister::new(&c, Vec::<u8>::new());
-        let entries: Vec<EntryInfo> = vec!["a", "b"]
-            .into_iter()
-            .map(EntryInfo::from_name_only)
-            .collect();
-        assert_eq!(lister.calculate_columns_widths(&entries), None);
     }
 
     #[test]
@@ -880,76 +602,6 @@ mod tests {
             sort: Sort::Default,
             paths,
         }
-    }
-
-    #[test]
-    fn long_format_line_regular_file_permissions() {
-        let entry = EntryInfo {
-            permissions: 0o644,
-            ..EntryInfo::from_name_only("file")
-        };
-        assert_eq!(LongFormatLine::from(&entry).mode, "-rw-r--r--");
-    }
-
-    #[test]
-    fn long_format_line_directory_type_char() {
-        let entry = EntryInfo {
-            is_dir: true,
-            permissions: 0o755,
-            ..EntryInfo::from_name_only("dir")
-        };
-        assert_eq!(LongFormatLine::from(&entry).mode, "drwxr-xr-x");
-    }
-
-    #[test]
-    fn long_format_line_symlink_shows_target() {
-        let entry = EntryInfo {
-            is_symlink: true,
-            permissions: 0o777,
-            symlink_target: Some(PathBuf::from("target")),
-            ..EntryInfo::from_name_only("link")
-        };
-        let line = LongFormatLine::from(&entry);
-        assert_eq!(line.mode, "lrwxrwxrwx");
-        assert_eq!(line.name, "link -> target");
-    }
-
-    #[test]
-    fn long_format_line_columns_match_fields() {
-        // uid/gid that (almost certainly) don't resolve to a real user/group,
-        // so LongFormatLine falls back to their numeric representation.
-        let entry = EntryInfo {
-            nlink: 3,
-            size: 1234,
-            uid: u32::MAX,
-            gid: u32::MAX,
-            ..EntryInfo::from_name_only("file")
-        };
-        let line = LongFormatLine::from(&entry);
-        assert_eq!(line.nlink, "3");
-        assert_eq!(line.size, "1234");
-        assert_eq!(line.user_name, u32::MAX.to_string());
-        assert_eq!(line.group_name, u32::MAX.to_string());
-    }
-
-    #[test]
-    fn write_one_column_output_long_format_prints_total_in_1024_blocks() {
-        let c = long_config(vec![]);
-        let mut out = Vec::new();
-        let mut lister = Lister::new(&c, &mut out);
-        let entries = vec![
-            EntryInfo {
-                blocks_512: 8,
-                ..EntryInfo::from_name_only("a")
-            },
-            EntryInfo {
-                blocks_512: 16,
-                ..EntryInfo::from_name_only("b")
-            },
-        ];
-        lister.write_one_column_output(&entries).unwrap();
-        let out_str = String::from_utf8(out).unwrap();
-        assert!(out_str.starts_with("total 12\n"));
     }
 
     #[test]
