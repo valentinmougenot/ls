@@ -13,11 +13,22 @@ pub trait OutputFormatter {
     fn write(&self, out: &mut dyn io::Write, entries: &[EntryInfo]) -> io::Result<()>;
 }
 
-pub struct LongFormatter;
+pub struct LongFormatter {
+    human_readable: bool,
+}
+
+impl LongFormatter {
+    fn new(human_readable: bool) -> Self {
+        Self { human_readable }
+    }
+}
 
 impl OutputFormatter for LongFormatter {
     fn write(&self, out: &mut dyn io::Write, entries: &[EntryInfo]) -> io::Result<()> {
-        let lines: Vec<_> = entries.iter().map(LongFormatLine::from).collect();
+        let lines: Vec<_> = entries
+            .iter()
+            .map(|e| LongFormatLine::from_entry(e, self.human_readable))
+            .collect();
         let col_widths = LongFormatColumnWidths::from_lines(&lines);
 
         writeln!(out, "total {}", total_kb_blocks(entries))?;
@@ -66,8 +77,8 @@ impl LongFormatLine {
     }
 }
 
-impl From<&EntryInfo> for LongFormatLine {
-    fn from(value: &EntryInfo) -> Self {
+impl LongFormatLine {
+    fn from_entry(value: &EntryInfo, human_readable: bool) -> Self {
         let mut mode = String::new();
         if value.is_dir {
             mode.push('d');
@@ -105,6 +116,12 @@ impl From<&EntryInfo> for LongFormatLine {
             _ => value.gid.to_string(),
         };
 
+        let size = if human_readable {
+            Self::format_size_for_human(value.size)
+        } else {
+            value.size.to_string()
+        };
+
         let datetime: DateTime<Local> = value.modified_at.into();
         let now = Local::now();
         let is_old = now.signed_duration_since(datetime).num_days() > 180;
@@ -130,10 +147,40 @@ impl From<&EntryInfo> for LongFormatLine {
             nlink: value.nlink.to_string(),
             user_name,
             group_name,
-            size: value.size.to_string(),
+            size,
             modified,
             name,
         }
+    }
+
+    fn format_size_for_human(size: u64) -> String {
+        if size < 1024 {
+            return size.to_string();
+        }
+
+        let mut size = size as f64;
+        let units = ['K', 'M', 'G', 'T', 'P', 'E'];
+        let mut units_iter = units.iter();
+        let mut unit = units_iter.next();
+        size /= 1024.0;
+
+        while size > 1024.0 {
+            size /= 1024.0;
+            unit = units_iter.next();
+        }
+
+        if size < 10.0 {
+            return format!("{:.1}{}", size, unit.expect("File too big"));
+        }
+
+        size = size.round();
+        if size >= 1024.0 {
+            size /= 1024.0;
+            unit = units_iter.next();
+            return format!("{:.1}{}", size, unit.expect("File too big"));
+        }
+
+        format!("{:.0}{}", size, unit.expect("File too big"))
     }
 }
 
@@ -224,7 +271,7 @@ fn write_columns(
 pub fn get_formatter(config: &Config) -> Box<dyn OutputFormatter> {
     match config.format {
         Format::OneLine => Box::new(OneLineFormatter),
-        Format::Long => Box::new(LongFormatter),
+        Format::Long => Box::new(LongFormatter::new(config.human_readable)),
         Format::Default => Box::new(ColumnsFormatter),
     }
 }
@@ -295,7 +342,7 @@ mod tests {
             permissions: 0o644,
             ..EntryInfo::from_name_only("file")
         };
-        assert_eq!(LongFormatLine::from(&entry).mode, "-rw-r--r--");
+        assert_eq!(LongFormatLine::from_entry(&entry, false).mode, "-rw-r--r--");
     }
 
     #[test]
@@ -305,7 +352,7 @@ mod tests {
             permissions: 0o755,
             ..EntryInfo::from_name_only("dir")
         };
-        assert_eq!(LongFormatLine::from(&entry).mode, "drwxr-xr-x");
+        assert_eq!(LongFormatLine::from_entry(&entry, false).mode, "drwxr-xr-x");
     }
 
     #[test]
@@ -316,7 +363,7 @@ mod tests {
             symlink_target: Some(PathBuf::from("target")),
             ..EntryInfo::from_name_only("link")
         };
-        let line = LongFormatLine::from(&entry);
+        let line = LongFormatLine::from_entry(&entry, false);
         assert_eq!(line.mode, "lrwxrwxrwx");
         assert_eq!(line.name, "link -> target");
     }
@@ -332,7 +379,7 @@ mod tests {
             gid: u32::MAX,
             ..EntryInfo::from_name_only("file")
         };
-        let line = LongFormatLine::from(&entry);
+        let line = LongFormatLine::from_entry(&entry, false);
         assert_eq!(line.nlink, "3");
         assert_eq!(line.size, "1234");
         assert_eq!(line.user_name, u32::MAX.to_string());
@@ -352,8 +399,39 @@ mod tests {
             },
         ];
         let mut out = Vec::new();
-        LongFormatter.write(&mut out, &entries).unwrap();
+        LongFormatter::new(false).write(&mut out, &entries).unwrap();
         let out_str = String::from_utf8(out).unwrap();
         assert!(out_str.starts_with("total 12\n"));
+    }
+
+    #[test]
+    fn format_size_for_human_below_1024_has_no_suffix() {
+        assert_eq!(LongFormatLine::format_size_for_human(923), "923");
+    }
+
+    #[test]
+    fn format_size_for_human_keeps_one_decimal_below_ten() {
+        assert_eq!(LongFormatLine::format_size_for_human(4096), "4.0K");
+    }
+
+    #[test]
+    fn format_size_for_human_drops_decimal_at_two_digits() {
+        assert_eq!(LongFormatLine::format_size_for_human(10240), "10K");
+    }
+
+    #[test]
+    fn format_size_for_human_advances_unit_at_exact_power_boundary() {
+        assert_eq!(LongFormatLine::format_size_for_human(1_048_576), "1.0M");
+        assert_eq!(LongFormatLine::format_size_for_human(1_073_741_824), "1.0G");
+    }
+
+    #[test]
+    fn long_format_line_uses_human_readable_size_when_enabled() {
+        let entry = EntryInfo {
+            size: 1_048_576,
+            ..EntryInfo::from_name_only("file")
+        };
+        assert_eq!(LongFormatLine::from_entry(&entry, true).size, "1.0M");
+        assert_eq!(LongFormatLine::from_entry(&entry, false).size, "1048576");
     }
 }

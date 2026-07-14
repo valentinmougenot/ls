@@ -7,6 +7,7 @@ pub struct Config {
     pub list_dir: bool,
     pub recursive: bool,
     pub sort: Sort,
+    pub human_readable: bool,
     pub paths: Vec<PathBuf>,
 }
 

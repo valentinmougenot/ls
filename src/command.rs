@@ -26,11 +26,19 @@ pub mod options {
     pub const DIRECTORY: &str = "directory";
     pub const REVERSE: &str = "reverse";
     pub const RECURSIVE: &str = "recursive";
+    pub const HUMAN_READABLE: &str = "human-readable";
     pub const PATH: &str = "path";
 }
 
 pub fn get_matches() -> ArgMatches {
     Command::new("ls")
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("help")
+                .long("help")
+                .action(ArgAction::Help)
+                .help("Print help"),
+        )
         .arg(
             Arg::new(options::format::ONE_LINE)
                 .short('1')
@@ -100,6 +108,13 @@ pub fn get_matches() -> ArgMatches {
                 .short('l')
                 .long(options::format::LONG)
                 .help("use a long listing format")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(options::HUMAN_READABLE)
+                .short('h')
+                .long(options::HUMAN_READABLE)
+                .help("with -l and -s, print sizes like 1K 234M 2G etc.")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -197,6 +212,7 @@ impl From<&ArgMatches> for Config {
             list_dir: options.get_flag(options::DIRECTORY),
             recursive: options.get_flag(options::RECURSIVE),
             sort: extract_sort(options),
+            human_readable: options.get_flag(options::HUMAN_READABLE),
             paths: extract_paths(options),
         }
     }

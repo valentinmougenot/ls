@@ -316,6 +316,7 @@ mod tests {
             list_dir: false,
             recursive,
             sort: Sort::Default,
+            human_readable: false,
             paths,
         }
     }
@@ -334,6 +335,7 @@ mod tests {
             list_dir: false,
             recursive: false,
             sort: Sort::Time,
+            human_readable: false,
             paths,
         }
     }
@@ -538,6 +540,7 @@ mod tests {
             list_dir: false,
             recursive: false,
             sort: Sort::Size,
+            human_readable: false,
             paths,
         }
     }
@@ -600,6 +603,7 @@ mod tests {
             list_dir: false,
             recursive: false,
             sort: Sort::Default,
+            human_readable: false,
             paths,
         }
     }
