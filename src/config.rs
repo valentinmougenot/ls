@@ -13,6 +13,7 @@ pub struct Config {
 #[derive(PartialEq, Eq)]
 pub enum Format {
     OneLine,
+    Long,
     Default,
 }
 
@@ -26,5 +27,6 @@ pub enum HiddenMode {
 #[derive(PartialEq, Eq)]
 pub enum Sort {
     Time,
+    Size,
     Default,
 }

@@ -9,6 +9,7 @@ use crate::config::{Config, Format, HiddenMode, Sort};
 pub mod options {
     pub mod format {
         pub const ONE_LINE: &str = "1";
+        pub const LONG: &str = "l";
     }
 
     pub mod hidden_mode {
@@ -19,6 +20,7 @@ pub mod options {
 
     pub mod sort {
         pub const TIME: &str = "t";
+        pub const SIZE: &str = "S";
     }
 
     pub const DIRECTORY: &str = "directory";
@@ -82,7 +84,22 @@ pub fn get_matches() -> ArgMatches {
         .arg(
             Arg::new(options::sort::TIME)
                 .short('t')
+                .overrides_with_all([options::sort::TIME, options::sort::SIZE])
                 .help("sort by time, newest first; see --time")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(options::sort::SIZE)
+                .short('S')
+                .overrides_with_all([options::sort::TIME, options::sort::SIZE])
+                .help("sort by file size, largest first")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new(options::format::LONG)
+                .short('l')
+                .long(options::format::LONG)
+                .help("use a long listing format")
                 .action(ArgAction::SetTrue),
         )
         .arg(
@@ -103,11 +120,14 @@ fn extract_format(options: &ArgMatches) -> Format {
     };
 
     let one_line_idx = get_idx(options::format::ONE_LINE);
+    let long_idx = get_idx(options::format::LONG);
 
-    let max_idx = one_line_idx;
+    let max_idx = one_line_idx.max(long_idx);
 
     if max_idx == 0 {
         Format::Default
+    } else if long_idx > 0 {
+        Format::Long
     } else {
         Format::OneLine
     }
@@ -146,14 +166,17 @@ fn extract_sort(options: &ArgMatches) -> Sort {
         }
     };
 
-    let sort_idx = get_idx(options::sort::TIME);
+    let time_idx = get_idx(options::sort::TIME);
+    let size_idx = get_idx(options::sort::SIZE);
 
-    let max_idx = sort_idx;
+    let max_idx = time_idx.max(size_idx);
 
     if max_idx == 0 {
         Sort::Default
-    } else {
+    } else if max_idx == time_idx {
         Sort::Time
+    } else {
+        Sort::Size
     }
 }
 
